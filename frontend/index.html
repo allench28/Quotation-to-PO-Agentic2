@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AI Quotation Processor</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .upload-area { border: 2px dashed #ccc; padding: 40px; text-align: center; margin: 20px 0; }
+        .upload-area.dragover { border-color: #007bff; background-color: #f8f9fa; }
+        .btn { background: #007bff; color: white; padding: 10px 20px; border: none; cursor: pointer; }
+        .status { margin: 20px 0; padding: 10px; border-radius: 4px; }
+        .status.processing { background: #fff3cd; border: 1px solid #ffeaa7; }
+        .status.complete { background: #d4edda; border: 1px solid #c3e6cb; }
+        .status.error { background: #f8d7da; border: 1px solid #f5c6cb; }
+        .results { margin: 20px 0; padding: 20px; border: 1px solid #ddd; }
+    </style>
+</head>
+<body>
+    <h1>AI Quotation Processor</h1>
+    
+    <div class="upload-area" id="uploadArea">
+        <p>Drop PDF or Word files here or click to select</p>
+        <input type="file" id="fileInput" accept=".pdf,.doc,.docx" style="display: none;">
+        <button class="btn" onclick="document.getElementById('fileInput').click()">Select File</button>
+    </div>
+    
+    <div id="status" class="status" style="display: none;"></div>
+    
+    <div id="results" class="results" style="display: none;">
+        <h3>Extracted Information</h3>
+        <div id="extractedData"></div>
+        <button class="btn" onclick="generatePO()">Generate Purchase Order</button>
+    </div>
+    
+    <div id="purchaseOrder" style="display: none;">
+        <h3>Generated Purchase Order</h3>
+        <div id="poContent"></div>
+    </div>
+
+    <script>
+        const API_URL = 'YOUR_API_GATEWAY_URL';
+        let currentQuotationId = null;
+
+        document.getElementById('fileInput').addEventListener('change', handleFileSelect);
+        
+        const uploadArea = document.getElementById('uploadArea');
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+        
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+        
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                processFile(files[0]);
+            }
+        });
+
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (file) {
+                processFile(file);
+            }
+        }
+
+        async function processFile(file) {
+            if (!file.type.includes('pdf') && !file.type.includes('word')) {
+                showStatus('Please select a PDF or Word document', 'error');
+                return;
+            }
+
+            showStatus('Uploading and processing document...', 'processing');
+
+            const reader = new FileReader();
+            reader.onload = async function(e) {
+                const base64 = btoa(e.target.result);
+                
+                try {
+                    const response = await fetch(`${API_URL}/upload`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: base64
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (response.ok) {
+                        currentQuotationId = result.quotation_id;
+                        showStatus('Processing complete!', 'complete');
+                        displayResults(result.data);
+                    } else {
+                        showStatus(`Error: ${result.error}`, 'error');
+                    }
+                } catch (error) {
+                    showStatus(`Error: ${error.message}`, 'error');
+                }
+            };
+            reader.readAsBinaryString(file);
+        }
+
+        function showStatus(message, type) {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.className = `status ${type}`;
+            status.style.display = 'block';
+        }
+
+        function displayResults(data) {
+            const results = document.getElementById('results');
+            const extractedData = document.getElementById('extractedData');
+            extractedData.innerHTML = `<pre>${data}</pre>`;
+            results.style.display = 'block';
+        }
+
+        function generatePO() {
+            const poContent = document.getElementById('poContent');
+            poContent.innerHTML = `
+                <h4>Purchase Order #PO-${currentQuotationId.substring(0, 8)}</h4>
+                <p>Generated from quotation data</p>
+                <p>Date: ${new Date().toLocaleDateString()}</p>
+                <div>Based on extracted quotation information</div>
+            `;
+            document.getElementById('purchaseOrder').style.display = 'block';
+        }
+    </script>
+</body>
+</html>

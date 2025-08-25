@@ -27,8 +27,9 @@ done
 # Delete S3 buckets
 echo "Deleting S3 buckets..."
 for bucket in $(aws s3api list-buckets --query 'Buckets[?starts_with(Name, `quotation-`)].Name' --output text); do
-    aws s3 rm s3://$bucket --recursive
-    aws s3 rb s3://$bucket
+    echo "Emptying bucket: $bucket"
+    aws s3 rm s3://$bucket --recursive 2>/dev/null
+    aws s3api delete-bucket --bucket $bucket --region $REGION 2>/dev/null
 done
 
 # Delete DynamoDB table

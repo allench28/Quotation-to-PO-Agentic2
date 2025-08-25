@@ -14,14 +14,14 @@ for api_id in $(aws apigateway get-rest-apis --region $REGION --query 'items[?na
     aws apigateway delete-rest-api --rest-api-id $api_id --region $REGION
 done
 
-# Delete CloudFront distributions
-echo "Deleting CloudFront distributions..."
+# Disable CloudFront distributions
+echo "Disabling CloudFront distributions..."
 for dist_id in $(aws cloudfront list-distributions --query 'DistributionList.Items[?Comment==`Quotation Processor Distribution`].Id' --output text); do
+    echo "Disabling distribution: $dist_id"
+    ETAG=$(aws cloudfront get-distribution --id $dist_id --query 'ETag' --output text)
     aws cloudfront get-distribution-config --id $dist_id --query 'DistributionConfig' > /tmp/dist-config.json
-    aws cloudfront update-distribution --id $dist_id --distribution-config file:///tmp/dist-config.json --if-match $(aws cloudfront get-distribution --id $dist_id --query 'ETag' --output text) --cli-input-json '{"DistributionConfig":{"Enabled":false}}'
-    echo "Waiting for distribution to disable..."
-    aws cloudfront wait distribution-deployed --id $dist_id
-    aws cloudfront delete-distribution --id $dist_id --if-match $(aws cloudfront get-distribution --id $dist_id --query 'ETag' --output text)
+    sed -i 's/"Enabled": true/"Enabled": false/' /tmp/dist-config.json
+    aws cloudfront update-distribution --id $dist_id --distribution-config file:///tmp/dist-config.json --if-match $ETAG 2>/dev/null
 done
 
 # Delete S3 buckets

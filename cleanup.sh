@@ -1,0 +1,44 @@
+#!/bin/bash
+
+echo "Starting cleanup of AI Quotation Processor resources..."
+
+REGION="us-east-1"
+
+# Delete Lambda function
+echo "Deleting Lambda function..."
+aws lambda delete-function --function-name quotation-processor-function --region $REGION 2>/dev/null
+
+# Delete API Gateway
+echo "Deleting API Gateway..."
+for api_id in $(aws apigateway get-rest-apis --region $REGION --query 'items[?name==`quotation-api`].id' --output text); do
+    aws apigateway delete-rest-api --rest-api-id $api_id --region $REGION
+done
+
+# Delete CloudFront distributions
+echo "Deleting CloudFront distributions..."
+for dist_id in $(aws cloudfront list-distributions --query 'DistributionList.Items[?Comment==`Quotation Processor Distribution`].Id' --output text); do
+    aws cloudfront get-distribution-config --id $dist_id --query 'DistributionConfig' > /tmp/dist-config.json
+    aws cloudfront update-distribution --id $dist_id --distribution-config file:///tmp/dist-config.json --if-match $(aws cloudfront get-distribution --id $dist_id --query 'ETag' --output text) --cli-input-json '{"DistributionConfig":{"Enabled":false}}'
+    echo "Waiting for distribution to disable..."
+    aws cloudfront wait distribution-deployed --id $dist_id
+    aws cloudfront delete-distribution --id $dist_id --if-match $(aws cloudfront get-distribution --id $dist_id --query 'ETag' --output text)
+done
+
+# Delete S3 buckets
+echo "Deleting S3 buckets..."
+for bucket in $(aws s3api list-buckets --query 'Buckets[?starts_with(Name, `quotation-`)].Name' --output text); do
+    aws s3 rm s3://$bucket --recursive
+    aws s3 rb s3://$bucket
+done
+
+# Delete DynamoDB table
+echo "Deleting DynamoDB table..."
+aws dynamodb delete-table --table-name QuotationData --region $REGION 2>/dev/null
+
+# Delete IAM role and policies
+echo "Deleting IAM role..."
+aws iam detach-role-policy --role-name quotation-lambda-role --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole 2>/dev/null
+aws iam delete-role-policy --role-name quotation-lambda-role --policy-name quotation-policy 2>/dev/null
+aws iam delete-role --role-name quotation-lambda-role 2>/dev/null
+
+echo "Cleanup complete!"

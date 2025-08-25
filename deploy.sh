@@ -1,170 +1,231 @@
 #!/bin/bash
 
-echo "Starting AI Quotation Processor deployment..."
+echo "🚀 AI Quotation Processor - Final Deployment (us-east-2)"
+echo "========================================================"
 
-# Set variables
-REGION="us-east-1"
-STACK_NAME="quotation-processor"
-LAMBDA_FUNCTION_NAME="quotation-processor-function"
+PROJECT_NAME="quotation-processor-final"
+REGION="us-east-2"
+
+# Get AWS Account ID
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+# Create timestamp
+TIMESTAMP=$(date +%s)
+
+echo "📦 Step 1/5: Backend Infrastructure"
+echo "==================================="
 
 # Create DynamoDB table
-echo "Creating DynamoDB table..."
 aws dynamodb create-table \
-    --table-name QuotationData \
+    --table-name $PROJECT_NAME-quotations \
     --attribute-definitions AttributeName=quotation_id,AttributeType=S \
     --key-schema AttributeName=quotation_id,KeyType=HASH \
     --billing-mode PAY_PER_REQUEST \
-    --region $REGION
+    --region $REGION 2>/dev/null
 
 # Create S3 buckets
-echo "Creating S3 buckets..."
-DOC_BUCKET="quotation-docs-$(date +%s)"
-WEB_BUCKET="quotation-web-$(date +%s)"
+DOCS_BUCKET="$PROJECT_NAME-docs-$TIMESTAMP"
+WEB_BUCKET="$PROJECT_NAME-web-$TIMESTAMP"
 
-aws s3 mb s3://$DOC_BUCKET --region $REGION
+aws s3 mb s3://$DOCS_BUCKET --region $REGION
 aws s3 mb s3://$WEB_BUCKET --region $REGION
 
-# Configure web bucket for static hosting
-aws s3 website s3://$WEB_BUCKET --index-document index.html
-
-# Create IAM role for Lambda
-echo "Creating IAM role..."
-aws iam create-role \
-    --role-name quotation-lambda-role \
-    --assume-role-policy-document '{
-        "Version": "2012-10-17",
-        "Statement": [{
-            "Effect": "Allow",
-            "Principal": {"Service": "lambda.amazonaws.com"},
-            "Action": "sts:AssumeRole"
-        }]
-    }'
-
-# Attach policies
-aws iam attach-role-policy \
-    --role-name quotation-lambda-role \
-    --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-
-aws iam put-role-policy \
-    --role-name quotation-lambda-role \
-    --policy-name quotation-policy \
-    --policy-document '{
-        "Version": "2012-10-17",
-        "Statement": [
-            {
-                "Effect": "Allow",
-                "Action": ["s3:*", "dynamodb:*", "bedrock:*"],
-                "Resource": "*"
-            }
-        ]
-    }'
-
-# Wait for IAM role propagation
-echo "Waiting for IAM role to propagate..."
-sleep 30
-
-# Package and deploy Lambda
-echo "Deploying Lambda function..."
-cd backend
-zip -r function.zip lambda_function.py
-aws lambda create-function \
-    --function-name $LAMBDA_FUNCTION_NAME \
-    --runtime python3.9 \
-    --role arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):role/quotation-lambda-role \
-    --handler lambda_function.lambda_handler \
-    --zip-file fileb://function.zip \
-    --timeout 60 \
-    --memory-size 512 \
+# Make both buckets public
+aws s3api put-public-access-block \
+    --bucket $DOCS_BUCKET \
+    --public-access-block-configuration "BlockPublicAcls=false,IgnorePublicAcls=false,BlockPublicPolicy=false,RestrictPublicBuckets=false" \
     --region $REGION
 
+aws s3api put-bucket-policy \
+    --bucket $DOCS_BUCKET \
+    --policy '{"Version":"2012-10-17","Statement":[{"Sid":"PublicReadGetObject","Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::'$DOCS_BUCKET'/*"}]}' \
+    --region $REGION
+
+aws s3api put-public-access-block \
+    --bucket $WEB_BUCKET \
+    --public-access-block-configuration "BlockPublicAcls=false,IgnorePublicAcls=false,BlockPublicPolicy=false,RestrictPublicBuckets=false" \
+    --region $REGION
+
+aws s3api put-bucket-policy \
+    --bucket $WEB_BUCKET \
+    --policy '{"Version":"2012-10-17","Statement":[{"Sid":"PublicReadGetObject","Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::'$WEB_BUCKET'/*"}]}' \
+    --region $REGION
+
+# Create IAM role
+aws iam create-role \
+    --role-name $PROJECT_NAME-role \
+    --assume-role-policy-document file://lambda-trust-policy.json 2>/dev/null
+
+aws iam put-role-policy \
+    --role-name $PROJECT_NAME-role \
+    --policy-name $PROJECT_NAME-policy \
+    --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","dynamodb:PutItem","dynamodb:GetItem","bedrock:InvokeModel","logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"],"Resource":"*"}]}'
+
+sleep 15
+
+echo "📚 Step 2/5: Lambda Layer for PDF Generation"
+echo "============================================="
+
+# Create Lambda layer with PDF dependencies
+mkdir -p lambda-layer/python
+cd lambda-layer/python
+pip install fpdf2==2.7.6 fontTools==4.47.0 Pillow==10.1.0 defusedxml -t . --quiet
+cd ..
+zip -r ../pdf-layer.zip python
 cd ..
 
+LAYER_ARN=$(aws lambda publish-layer-version \
+    --layer-name $PROJECT_NAME-pdf-layer \
+    --zip-file fileb://pdf-layer.zip \
+    --compatible-runtimes python3.11 \
+    --region $REGION \
+    --query "LayerVersionArn" --output text)
+
+rm -rf lambda-layer pdf-layer.zip
+
+echo "⚡ Step 3/5: Lambda Function"
+echo "============================"
+
+# Create Lambda function
+cd backend
+zip lambda-function.zip document_processor.py simple_reports.py
+cd ..
+
+aws lambda create-function \
+    --function-name $PROJECT_NAME-processor \
+    --runtime python3.11 \
+    --role arn:aws:iam::$AWS_ACCOUNT_ID:role/$PROJECT_NAME-role \
+    --handler document_processor.handler \
+    --zip-file fileb://lambda-function.zip \
+    --timeout 300 \
+    --environment Variables="{DYNAMODB_TABLE=$PROJECT_NAME-quotations,S3_BUCKET=$DOCS_BUCKET}" \
+    --layers $LAYER_ARN \
+    --region $REGION
+
+rm lambda-function.zip
+
+echo "🌐 Step 4/5: API Gateway with CORS"
+echo "=================================="
+
 # Create API Gateway
-echo "Creating API Gateway..."
 API_ID=$(aws apigateway create-rest-api \
-    --name quotation-api \
+    --name $PROJECT_NAME-api \
     --region $REGION \
-    --query 'id' --output text)
+    --query "id" --output text)
 
-RESOURCE_ID=$(aws apigateway get-resources \
+ROOT_ID=$(aws apigateway get-resources \
     --rest-api-id $API_ID \
     --region $REGION \
-    --query 'items[0].id' --output text)
+    --query "items[0].id" --output text)
 
-# Create upload resource
-UPLOAD_RESOURCE_ID=$(aws apigateway create-resource \
+RESOURCE_ID=$(aws apigateway create-resource \
     --rest-api-id $API_ID \
-    --parent-id $RESOURCE_ID \
+    --parent-id $ROOT_ID \
     --path-part upload \
     --region $REGION \
-    --query 'id' --output text)
+    --query "id" --output text)
 
-# Create POST method
+# Setup POST method
 aws apigateway put-method \
     --rest-api-id $API_ID \
-    --resource-id $UPLOAD_RESOURCE_ID \
+    --resource-id $RESOURCE_ID \
     --http-method POST \
     --authorization-type NONE \
     --region $REGION
 
-# Add Lambda integration
 aws apigateway put-integration \
     --rest-api-id $API_ID \
-    --resource-id $UPLOAD_RESOURCE_ID \
+    --resource-id $RESOURCE_ID \
     --http-method POST \
     --type AWS_PROXY \
     --integration-http-method POST \
-    --uri arn:aws:apigateway:$REGION:lambda:path/2015-03-31/functions/arn:aws:lambda:$REGION:$(aws sts get-caller-identity --query Account --output text):function:$LAMBDA_FUNCTION_NAME/invocations \
+    --uri arn:aws:apigateway:$REGION:lambda:path/2015-03-31/functions/arn:aws:lambda:$REGION:$AWS_ACCOUNT_ID:function:$PROJECT_NAME-processor/invocations \
     --region $REGION
 
-# Add Lambda permission
+# Setup CORS
+aws apigateway put-method \
+    --rest-api-id $API_ID \
+    --resource-id $RESOURCE_ID \
+    --http-method OPTIONS \
+    --authorization-type NONE \
+    --region $REGION
+
+aws apigateway put-integration \
+    --rest-api-id $API_ID \
+    --resource-id $RESOURCE_ID \
+    --http-method OPTIONS \
+    --type MOCK \
+    --request-templates '{"application/json":"{\"statusCode\": 200}"}' \
+    --region $REGION
+
+aws apigateway put-method-response \
+    --rest-api-id $API_ID \
+    --resource-id $RESOURCE_ID \
+    --http-method OPTIONS \
+    --status-code 200 \
+    --response-parameters '{"method.response.header.Access-Control-Allow-Headers":false,"method.response.header.Access-Control-Allow-Methods":false,"method.response.header.Access-Control-Allow-Origin":false}' \
+    --region $REGION
+
+aws apigateway put-integration-response \
+    --rest-api-id $API_ID \
+    --resource-id $RESOURCE_ID \
+    --http-method OPTIONS \
+    --status-code 200 \
+    --response-parameters '{"method.response.header.Access-Control-Allow-Headers":"'"'"'Content-Type'"'"'","method.response.header.Access-Control-Allow-Methods":"'"'"'GET,POST,OPTIONS'"'"'","method.response.header.Access-Control-Allow-Origin":"'"'"'*'"'"'"}' \
+    --region $REGION
+
+# Add Lambda permission and deploy
 aws lambda add-permission \
-    --function-name $LAMBDA_FUNCTION_NAME \
-    --statement-id api-gateway-invoke \
+    --function-name $PROJECT_NAME-processor \
+    --statement-id api-gateway-invoke-$TIMESTAMP \
     --action lambda:InvokeFunction \
     --principal apigateway.amazonaws.com \
-    --source-arn "arn:aws:execute-api:$REGION:$(aws sts get-caller-identity --query Account --output text):$API_ID/*/*" \
+    --source-arn "arn:aws:execute-api:$REGION:$AWS_ACCOUNT_ID:$API_ID/*/*" \
     --region $REGION
 
-# Deploy API
 aws apigateway create-deployment \
     --rest-api-id $API_ID \
     --stage-name prod \
     --region $REGION
 
-# Update frontend with API URL
-echo "Updating frontend with API URL..."
-sed "s/YOUR_API_GATEWAY_URL/https:\/\/$API_ID.execute-api.$REGION.amazonaws.com\/prod/g" frontend/index.html > frontend/index_updated.html
+API_ENDPOINT="https://$API_ID.execute-api.$REGION.amazonaws.com/prod/upload"
 
-# Deploy frontend
-echo "Deploying frontend..."
-aws s3 cp frontend/index_updated.html s3://$WEB_BUCKET/index.html
+echo "🎨 Step 5/5: Frontend Deployment"
+echo "================================="
+
+# Update frontend with API endpoint
+sed "s/YOUR_API_GATEWAY_ENDPOINT/$API_ENDPOINT/g" frontend/index.html > frontend/index_updated.html
+
+# Upload frontend
+aws s3 sync frontend/ s3://$WEB_BUCKET/
 
 # Create CloudFront distribution
-echo "Creating CloudFront distribution..."
-DISTRIBUTION_ID=$(aws cloudfront create-distribution \
-    --distribution-config '{
-        "CallerReference": "'$(date +%s)'",
-        "Origins": {
-            "Quantity": 1,
-            "Items": [{
-                "Id": "S3Origin",
-                "DomainName": "'$WEB_BUCKET'.s3.amazonaws.com",
-                "S3OriginConfig": {"OriginAccessIdentity": ""}
-            }]
-        },
-        "DefaultCacheBehavior": {
-            "TargetOriginId": "S3Origin",
-            "ViewerProtocolPolicy": "redirect-to-https",
-            "MinTTL": 0,
-            "ForwardedValues": {"QueryString": false, "Cookies": {"Forward": "none"}}
-        },
-        "Comment": "Quotation Processor Distribution",
-        "Enabled": true
-    }' \
-    --query 'Distribution.Id' --output text)
+cat > cf-config.json << EOF
+{"CallerReference":"$TIMESTAMP","Comment":"$PROJECT_NAME frontend","DefaultRootObject":"index.html","Origins":{"Quantity":1,"Items":[{"Id":"S3-$WEB_BUCKET","DomainName":"$WEB_BUCKET.s3.$REGION.amazonaws.com","CustomOriginConfig":{"HTTPPort":80,"HTTPSPort":443,"OriginProtocolPolicy":"https-only"}}]},"DefaultCacheBehavior":{"TargetOriginId":"S3-$WEB_BUCKET","ViewerProtocolPolicy":"redirect-to-https","TrustedSigners":{"Enabled":false,"Quantity":0},"ForwardedValues":{"QueryString":false,"Cookies":{"Forward":"none"}},"MinTTL":0,"Compress":true},"Enabled":true,"PriceClass":"PriceClass_100"}
+EOF
 
-echo "Deployment complete!"
-echo "CloudFront URL: https://$(aws cloudfront get-distribution --id $DISTRIBUTION_ID --query 'Distribution.DomainName' --output text)"
-echo "API Gateway URL: https://$API_ID.execute-api.$REGION.amazonaws.com/prod"
-echo "S3 Website URL: http://$WEB_BUCKET.s3-website-$REGION.amazonaws.com"
+CLOUDFRONT_DOMAIN=$(aws cloudfront create-distribution \
+    --distribution-config file://cf-config.json \
+    --query "Distribution.DomainName" --output text)
+
+rm cf-config.json
+
+echo "🎉 DEPLOYMENT COMPLETE!"
+echo "======================="
+echo "🌐 CloudFront URL: https://$CLOUDFRONT_DOMAIN"
+echo "⚡ API Gateway URL: $API_ENDPOINT"
+echo "📦 S3 Website URL: https://$WEB_BUCKET.s3.$REGION.amazonaws.com/index.html"
+echo "📊 DynamoDB Table: $PROJECT_NAME-quotations"
+echo "🗄️ Documents Bucket: $DOCS_BUCKET"
+echo "🌍 Region: $REGION"
+echo ""
+echo "✅ Features:"
+echo "• PDF/Word document upload and processing"
+echo "• AI-powered data extraction using Bedrock Claude 3 Haiku"
+echo "• Automatic purchase order generation"
+echo "• PDF report generation with download links"
+echo "• Data storage in DynamoDB"
+echo "• CORS-enabled API Gateway"
+echo "• CloudFront CDN distribution"
+echo ""
+echo "🚀 Your AI Quotation Processor is ready!"

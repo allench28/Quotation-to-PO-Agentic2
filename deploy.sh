@@ -59,6 +59,10 @@ aws iam put-role-policy \
         ]
     }'
 
+# Wait for IAM role propagation
+echo "Waiting for IAM role to propagate..."
+sleep 30
+
 # Package and deploy Lambda
 echo "Deploying Lambda function..."
 cd backend
@@ -69,6 +73,8 @@ aws lambda create-function \
     --role arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):role/quotation-lambda-role \
     --handler lambda_function.lambda_handler \
     --zip-file fileb://function.zip \
+    --timeout 60 \
+    --memory-size 512 \
     --region $REGION
 
 cd ..
@@ -101,9 +107,38 @@ aws apigateway put-method \
     --authorization-type NONE \
     --region $REGION
 
+# Add Lambda integration
+aws apigateway put-integration \
+    --rest-api-id $API_ID \
+    --resource-id $UPLOAD_RESOURCE_ID \
+    --http-method POST \
+    --type AWS_PROXY \
+    --integration-http-method POST \
+    --uri arn:aws:apigateway:$REGION:lambda:path/2015-03-31/functions/arn:aws:lambda:$REGION:$(aws sts get-caller-identity --query Account --output text):function:$LAMBDA_FUNCTION_NAME/invocations \
+    --region $REGION
+
+# Add Lambda permission
+aws lambda add-permission \
+    --function-name $LAMBDA_FUNCTION_NAME \
+    --statement-id api-gateway-invoke \
+    --action lambda:InvokeFunction \
+    --principal apigateway.amazonaws.com \
+    --source-arn "arn:aws:execute-api:$REGION:$(aws sts get-caller-identity --query Account --output text):$API_ID/*/*" \
+    --region $REGION
+
+# Deploy API
+aws apigateway create-deployment \
+    --rest-api-id $API_ID \
+    --stage-name prod \
+    --region $REGION
+
+# Update frontend with API URL
+echo "Updating frontend with API URL..."
+sed "s/YOUR_API_GATEWAY_URL/https:\/\/$API_ID.execute-api.$REGION.amazonaws.com\/prod/g" frontend/index.html > frontend/index_updated.html
+
 # Deploy frontend
 echo "Deploying frontend..."
-aws s3 cp frontend/index.html s3://$WEB_BUCKET/
+aws s3 cp frontend/index_updated.html s3://$WEB_BUCKET/index.html
 
 # Create CloudFront distribution
 echo "Creating CloudFront distribution..."
